@@ -1,0 +1,37 @@
+{"time": "2025-11-08 14:28:29 IST", "level": "INFO", "msg": "System reset: checkpoints and logs cleared"}
+{"time": "2025-11-08 14:28:29 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:28:29 IST"}
+{"time": "2025-11-08 14:28:29 IST", "level": "SUCCESS", "msg": "Oxygen: checkpoint saved @ 2025-11-08 14:28:29 IST"}
+{"time": "2025-11-08 14:28:29 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:28:29 IST"}
+{"time": "2025-11-08 14:28:35 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:28:35 IST"}
+{"time": "2025-11-08 14:28:37 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:28:37 IST"}
+{"time": "2025-11-08 14:28:39 IST", "level": "SUCCESS", "msg": "Oxygen: checkpoint saved @ 2025-11-08 14:28:39 IST"}
+{"time": "2025-11-08 14:28:40 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:28:40 IST"}
+{"time": "2025-11-08 14:28:45 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:28:45 IST"}
+{"time": "2025-11-08 14:28:45 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:28:45 IST"}
+{"time": "2025-11-08 14:28:49 IST", "level": "SUCCESS", "msg": "Oxygen: checkpoint saved @ 2025-11-08 14:28:49 IST"}
+{"time": "2025-11-08 14:28:50 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:28:50 IST"}
+{"time": "2025-11-08 14:28:51 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:45 IST"}
+{"time": "2025-11-08 14:28:53 IST", "level": "ERROR", "msg": "Temperature: manual failure triggered"}
+{"time": "2025-11-08 14:28:53 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:45 IST"}
+{"time": "2025-11-08 14:28:54 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:55 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:55 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:28:55 IST"}
+{"time": "2025-11-08 14:28:56 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:57 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:57 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:57 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:58 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:58 IST", "level": "SUCCESS", "msg": "Temperature: recovered from checkpoint @ 2025-11-08 14:28:54 IST"}
+{"time": "2025-11-08 14:28:59 IST", "level": "SUCCESS", "msg": "Oxygen: checkpoint saved @ 2025-11-08 14:28:59 IST"}
+{"time": "2025-11-08 14:29:00 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:29:00 IST"}
+{"time": "2025-11-08 14:29:02 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:29:02 IST"}
+{"time": "2025-11-08 14:29:05 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:29:05 IST"}
+{"time": "2025-11-08 14:29:09 IST", "level": "SUCCESS", "msg": "Oxygen: checkpoint saved @ 2025-11-08 14:29:09 IST"}
+{"time": "2025-11-08 14:29:10 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:29:10 IST"}
+{"time": "2025-11-08 14:29:10 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:29:10 IST"}
+{"time": "2025-11-08 14:29:15 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:29:15 IST"}
+{"time": "2025-11-08 14:29:18 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:29:18 IST"}
+{"time": "2025-11-08 14:29:19 IST", "level": "SUCCESS", "msg": "Oxygen: checkpoint saved @ 2025-11-08 14:29:19 IST"}
+{"time": "2025-11-08 14:29:20 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:29:20 IST"}
+{"time": "2025-11-08 14:29:25 IST", "level": "SUCCESS", "msg": "Heart Rate: checkpoint saved @ 2025-11-08 14:29:25 IST"}
+{"time": "2025-11-08 14:29:26 IST", "level": "SUCCESS", "msg": "Temperature: checkpoint saved @ 2025-11-08 14:29:26 IST"}

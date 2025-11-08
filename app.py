@@ -1,234 +1,328 @@
-import streamlit as st
-import threading
-import time
-import random
-import pickle
-import os
+# app.py
+from flask import Flask, render_template_string, redirect, url_for
+import threading, time, random, pickle, os, json
 from datetime import datetime
 
-# ----------------------
-# Config
-# ----------------------
-st.set_page_config(page_title="Healthcare Async Checkpointing", layout="wide")
+try:
+    from zoneinfo import ZoneInfo
+    KOLKATA = ZoneInfo("Asia/Kolkata")
+except Exception:
+    KOLKATA = None
 
+app = Flask(__name__)
+
+# -------------------------
+# Config / Modules
+# -------------------------
 CHECKPOINT_DIR = "checkpoints"
+LOG_FILE = "events.log"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 MODULES = {
-    "Heart Rate": {"icon": "❤️", "unit": "bpm", "file": os.path.join(CHECKPOINT_DIR, "heart.pkl"), "interval": 5},
-    "Temperature": {"icon": "🌡️", "unit": "°C", "file": os.path.join(CHECKPOINT_DIR, "temp.pkl"), "interval": 8},
-    "Oxygen": {"icon": "🩸", "unit": "%", "file": os.path.join(CHECKPOINT_DIR, "oxy.pkl"), "interval": 10},
+    "Heart Rate": {"icon": "❤️", "unit": "bpm", "interval": 5, "file": os.path.join(CHECKPOINT_DIR, "heart.pkl")},
+    "Temperature": {"icon": "🌡️", "unit": "°C", "interval": 8, "file": os.path.join(CHECKPOINT_DIR, "temp.pkl")},
+    "Oxygen": {"icon": "🫁", "unit": "%", "interval": 10, "file": os.path.join(CHECKPOINT_DIR, "oxy.pkl")},
 }
 
-# ----------------------
+# runtime state for each module
+state = {
+    name: {
+        "value": None,
+        "status": "Active",
+        "last_cp": None,
+        "history": [],
+        "failed": False,
+        "last_checkpoint_time_epoch": 0.0,
+    }
+    for name in MODULES
+}
+
+state_lock = threading.Lock()
+
+# -------------------------
 # Helpers
-# ----------------------
+# -------------------------
+def now_local_iso():
+    if KOLKATA:
+        return datetime.now(KOLKATA).strftime("%Y-%m-%d %H:%M:%S %Z")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def now_str():
-    return datetime.now().strftime("%H:%M:%S")
+def add_log(level, msg):
+    entry = {"time": now_local_iso(), "level": level, "msg": msg}
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+def read_recent_logs(limit=80):
+    """Read recent logs safely — skip malformed or incomplete lines."""
+    if not os.path.exists(LOG_FILE):
+        return []
+    entries = []
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if "time" in data and "level" in data and "msg" in data:
+                    entries.append(data)
+            except json.JSONDecodeError:
+                # Skip any bad lines silently
+                continue
+    return list(reversed(entries))[:limit]
 
 
-def generate_value(name):
+# -------------------------
+# Checkpointing / Recovery
+# -------------------------
+def save_checkpoint_file(module_name, value):
+    meta = MODULES[module_name]
+    path = meta["file"]
+    try:
+        with open(path, "wb") as f:
+            pickle.dump({"value": value, "time": now_local_iso()}, f)
+        with state_lock:
+            state[module_name]["last_cp"] = now_local_iso()
+            state[module_name]["last_checkpoint_time_epoch"] = time.time()
+        add_log("SUCCESS", f"{module_name}: checkpoint saved @ {state[module_name]['last_cp']}")
+    except Exception as e:
+        add_log("ERROR", f"{module_name}: checkpoint save failed ({e})")
+        with state_lock:
+            state[module_name]["status"] = "Checkpoint Error"
+
+def async_save_checkpoint(module_name, value):
+    def _job():
+        save_checkpoint_file(module_name, value)
+        with state_lock:
+            if not state[module_name]["failed"]:
+                state[module_name]["status"] = "Active"
+    threading.Thread(target=_job, daemon=True).start()
+
+def load_checkpoint_file(module_name):
+    path = MODULES[module_name]["file"]
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+            return data
+        except Exception as e:
+            add_log("ERROR", f"{module_name}: checkpoint load failed ({e})")
+    return None
+
+def recover_module(module_name):
+    data = load_checkpoint_file(module_name)
+    with state_lock:
+        if data:
+            state[module_name]["value"] = data.get("value")
+            state[module_name]["status"] = "Recovered"
+            state[module_name]["failed"] = False
+            state[module_name]["last_cp"] = data.get("time")
+            add_log("SUCCESS", f"{module_name}: recovered from checkpoint @ {data.get('time')}")
+        else:
+            state[module_name]["status"] = "No Checkpoint"
+            state[module_name]["failed"] = False
+            add_log("WARN", f"{module_name}: no checkpoint available for recovery")
+
+# -------------------------
+# Simulation Threads
+# -------------------------
+def generate_value_for(name):
     if name == "Heart Rate":
         return random.randint(60, 100)
     if name == "Temperature":
         return round(random.uniform(36.0, 37.5), 1)
     if name == "Oxygen":
         return random.randint(92, 100)
+    return None
 
+def module_loop(name):
+    meta = MODULES[name]
+    interval = meta["interval"]
+    last_ck = time.time() - (interval // 2)
+    state[name]["last_checkpoint_time_epoch"] = last_ck
 
-# Use a non-blocking save: spawn a thread so UI stays responsive
-def async_save_checkpoint(name, value):
-    def _save():
-        path = MODULES[name]["file"]
-        try:
-            with open(path, "wb") as f:
-                pickle.dump({"value": value, "time": now_str()}, f)
-            add_log(f"{MODULES[name]['icon']} {name}: Checkpoint saved @ {now_str()}")
-            st.session_state.modules[name]["last_cp"] = now_str()
-            st.session_state.modules[name]["status"] = "🟡 Checkpoint saved"
-        except Exception as e:
-            add_log(f"⚠️ {name}: Checkpoint failed ({e})")
-            st.session_state.modules[name]["status"] = "⚠️ Checkpoint error"
+    while True:
+        with state_lock:
+            failed = state[name]["failed"]
 
-    t = threading.Thread(target=_save, daemon=True)
-    t.start()
+        if failed:
+            with state_lock:
+                state[name]["status"] = "Recovering..."
+            recover_module(name)
+            time.sleep(1)
+            continue
 
+        new_val = generate_value_for(name)
+        with state_lock:
+            state[name]["value"] = new_val
+            state[name]["history"].append(new_val)
+            if len(state[name]["history"]) > 300:
+                state[name]["history"] = state[name]["history"][-300:]
 
-def recover_from_checkpoint(name):
-    path = MODULES[name]["file"]
-    if os.path.exists(path):
-        try:
-            with open(path, "rb") as f:
-                data = pickle.load(f)
-            st.session_state.modules[name]["value"] = data.get("value")
-            st.session_state.modules[name]["status"] = "✅ Recovered from checkpoint"
-            add_log(f"{MODULES[name]['icon']} {name}: Recovered from checkpoint @ {data.get('time')}")
-        except Exception as e:
-            st.session_state.modules[name]["status"] = "⚠️ Recovery error"
-            add_log(f"⚠️ {name}: Recovery failed ({e})")
-    else:
-        st.session_state.modules[name]["status"] = "⚠️ No checkpoint"
-        add_log(f"⚠️ {MODULES[name]['icon']} {name}: No checkpoint found for recovery")
+        now_epoch = time.time()
+        last_cp = state[name]["last_checkpoint_time_epoch"]
+        if now_epoch - last_cp >= interval:
+            with state_lock:
+                state[name]["status"] = "Checkpointing..."
+            async_save_checkpoint(name, new_val)
 
-    st.session_state.modules[name]["failed"] = False
+        if random.random() < 0.01:
+            with state_lock:
+                state[name]["failed"] = True
+                state[name]["status"] = "Failed"
+            add_log("ERROR", f"{name}: spontaneous failure (simulated)")
 
+        time.sleep(1)
 
-def add_log(message):
-    timestamped = f"[{now_str()}] {message}"
-    if "logs" not in st.session_state:
-        st.session_state.logs = []
-    st.session_state.logs.insert(0, timestamped)
-    # keep logs reasonable
-    st.session_state.logs = st.session_state.logs[:200]
+# -------------------------
+# Routes
+# -------------------------
+@app.route("/")
+def dashboard():
+    cards_html = ""
+    with state_lock:
+        for name, meta in MODULES.items():
+            s = state[name]
+            display_val = f"{s['value']} {meta['unit']}" if s['value'] is not None else "—"
+            status = s['status']
+            last_cp = s['last_cp'] or "—"
 
-
-# ----------------------
-# Initialize session state
-# ----------------------
-if "modules" not in st.session_state:
-    st.session_state.modules = {
-        name: {"value": None, "status": "🟢 Active", "last_cp": None, "failed": False, "history": []}
-        for name in MODULES
-    }
-
-if "logs" not in st.session_state:
-    st.session_state.logs = [f"[{now_str()}] System: Ready"]
-
-# ----------------------
-# UI - Header & Controls
-# ----------------------
-st.title("🏥 Healthcare Monitoring Cloud — Async Checkpointing Demo")
-st.markdown(
-    "This demo simulates multiple independent monitoring modules. Each module periodically saves an asynchronous checkpoint. "
-    "On failure, only the affected module restores from its last checkpoint while others keep running (non-blocking recovery)."
-)
-
-col_main, col_logs = st.columns([3, 1])
-
-with col_logs:
-    st.subheader("📋 System Logs")
-    st.write("(most recent first)")
-    st.text_area("logs", value="\n".join(st.session_state.logs[:30]), height=480)
-
-# ----------------------
-# Module Cards
-# ----------------------
-cols = st.columns(len(MODULES))
-for i, (name, meta) in enumerate(MODULES.items()):
-    with cols[i]:
-        card = st.container()
-        with card:
-            st.markdown(f"### {meta['icon']} {name}")
-
-            state = st.session_state.modules[name]
-
-            # simulate manual failure
-            fail_btn = st.button(f"💥 Fail {name}", key=f"fail_{name}")
-            if fail_btn:
-                state["failed"] = True
-                state["status"] = "🔴 Failed (Recovering...)"
-                add_log(f"{meta['icon']} {name}: Simulated failure triggered")
-
-            # If failed, attempt recovery immediately (non-blocking)
-            if state["failed"]:
-                recover_from_checkpoint(name)
-
-            if not state["failed"]:
-                new_val = generate_value(name)
-                state["value"] = new_val
-                state["history"].append(new_val)
-                # keep history small for charts
-                state["history"] = state["history"][-120:]
-
-                # Checkpointing logic: non-blocking save when the interval boundary is hit
-                try:
-                    current_seconds = int(time.time())
-                    if current_seconds % meta["interval"] == 0:
-                        async_save_checkpoint(name, new_val)
-                    else:
-                        # if not checkpointing, ensure status is active unless recovery message present
-                        if "Recovered" not in state["status"] and "Checkpoint" not in state["status"]:
-                            state["status"] = "🟢 Active"
-                except Exception as e:
-                    add_log(f"⚠️ {name}: Error in checkpointing logic ({e})")
-
-
-                state["value"] = new_val
-                state["history"].append(new_val)
-                # keep history small for charts
-                state["history"] = state["history"][-120:]
-
-                # Checkpointing logic: non-blocking save when the interval boundary is hit
-                # We use modulo of seconds so different modules will checkpoint at different times
-                try:
-                    current_seconds = int(time.time())
-                    if current_seconds % meta["interval"] == 0:
-                        async_save_checkpoint(name, new_val)
-                    else:
-                        # if not checkpointing, ensure status is active unless recovery message present
-                        if "Recovered" not in state["status"] and "Checkpoint" not in state["status"]:
-                            state["status"] = "🟢 Active"
-                except Exception as e:
-                    add_log(f"⚠️ {name}: Error in checkpointing logic ({e})")
-
-            # Display metrics and status with simple colored badges
-            value_display = f"{state['value']} {meta['unit']}" if state['value'] is not None else "—"
-            st.metric(label="Current Value", value=value_display)
-
-            # Status badge
-            status = state["status"]
-            # Simple color mapping
-            color = "black"
             if "Active" in status:
-                color = "green"
+                pill = "<span style='background:#dcfce7;color:#16a34a;padding:6px 10px;border-radius:999px;font-weight:700;'>ACTIVE</span>"
             elif "Checkpoint" in status:
-                color = "orange"
-            elif "Failed" in status or "error" in status:
-                color = "red"
+                pill = "<span style='background:#fef9c3;color:#f59e0b;padding:6px 10px;border-radius:999px;font-weight:700;'>CHECKPOINTING</span>"
+            elif "Failed" in status:
+                pill = "<span style='background:#fee2e2;color:#dc2626;padding:6px 10px;border-radius:999px;font-weight:700;'>FAILED</span>"
             elif "Recovered" in status:
-                color = "blue"
+                pill = "<span style='background:#dbeafe;color:#2563eb;padding:6px 10px;border-radius:999px;font-weight:700;'>RECOVERED</span>"
+            else:
+                pill = f"<span style='background:#f1f5f9;color:#64748b;padding:6px 10px;border-radius:999px;font-weight:700;'> {status} </span>"
 
-            st.markdown(f"**Status:** <span style='color:{color}; font-weight:600'>{status}</span>", unsafe_allow_html=True)
-            st.markdown(f"**Last checkpoint:** {state['last_cp']}")
+            cards_html += f"""
+            <div style='flex:1; min-width:220px; margin:8px; padding:18px; border-radius:12px; background:white; box-shadow:0 6px 18px rgba(2,6,23,0.06);'>
+                <div style='display:flex; justify-content:space-between; align-items:center;'>
+                    <div style='font-weight:700; font-size:16px;'>{name}</div>
+                    <div style='font-size:22px;'>{meta['icon']}</div>
+                </div>
+                <div style='margin-top:12px; font-weight:800; font-size:28px;'>{display_val}</div>
+                <div style='margin-top:10px;'>{pill}</div>
+                <div style='margin-top:8px; color:#64748b; font-size:13px;'>Last checkpoint: <strong>{last_cp}</strong></div>
+                <div style='margin-top:10px;'>
+                    <a href="/fail/{name}" style="color:#dc3545; font-weight:700; text-decoration:none;">💥 Fail</a>
+                    &nbsp;&nbsp;
+                    <a href="/recover/{name}" style="color:#0d6efd; font-weight:700; text-decoration:none;">🔁 Recover</a>
+                </div>
+            </div>
+            """
 
-            # Chart
-            if len(state["history"]) > 1:
-                st.line_chart(state["history"], height=180)
+    logs = read_recent_logs(80)
+    rows = ""
+    for entry in logs:
+        color = {"SUCCESS": "#16a34a", "ERROR": "#dc2626", "WARN": "#f59e0b"}.get(entry["level"], "#3b82f6")
+        rows += f"""
+        <tr>
+            <td style="padding:10px; color:#64748b; width:220px;">{entry['time']}</td>
+            <td style="padding:10px; width:120px;"><span style="color:{color}; font-weight:700;">{entry['level']}</span></td>
+            <td style="padding:10px;">{entry['msg']}</td>
+        </tr>
+        """
 
-            # Small spacer
-            st.write("\n")
+    html = f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset='utf-8' />
+        <meta name='viewport' content='width=device-width, initial-scale=1' />
+        <title>Cloud Health Monitor</title>
+        <style>
+          body {{ font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial; background:#f1f6fb; margin:0; }}
+          .container {{ max-width:1100px; margin:18px auto; padding:18px; }}
+          .grid {{ display:flex; gap:12px; flex-wrap:wrap; }}
+          .log-table {{ width:100%; border-collapse:collapse; background:white; border-radius:10px; overflow:hidden; }}
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <header style="display:flex; justify-content:space-between; align-items:center; padding:12px 0;">
+            <div style="display:flex; align-items:center; gap:12px;">
+              <div style="font-size:36px;">🏥</div>
+              <div>
+                <div style="font-weight:800; font-size:20px;">Cloud Health Monitor</div>
+                <div style="color:#64748b; font-size:13px;">Asynchronous checkpointing — each module saves independently</div>
+              </div>
+            </div>
+            <div style="display:flex; gap:12px; align-items:center;">
+              <a href="/" style="text-decoration:none; color:#0f172a; font-weight:700;">Refresh</a>
+              <a href="/reset" style="text-decoration:none; color:#0f172a; font-weight:700;">Reset</a>
+            </div>
+          </header>
 
-# ----------------------
-# Footer / Controls
-# ----------------------
-st.markdown("---")
-ctrl_col1, ctrl_col2 = st.columns([1, 3])
-with ctrl_col1:
-    if st.button("🧹 Reset Checkpoints & Logs"):
-        # remove checkpoint files
-        for meta in MODULES.values():
-            try:
-                if os.path.exists(meta["file"]):
-                    os.remove(meta["file"])
-            except:
-                pass
-        st.session_state.logs = [f"[{now_str()}] System: Checkpoints cleared"]
-        for name in MODULES:
-            st.session_state.modules[name] = {"value": None, "status": "🟢 Active", "last_cp": None, "failed": False, "history": []}
-        st.experimental_rerun()
+          <main>
+            <section style="margin-top:18px;">
+              <div class="grid">{cards_html}</div>
+            </section>
 
-with ctrl_col2:
-    st.markdown("**Demo Controls / Notes**")
-    st.write("• Click a module's 'Fail' button to simulate a crash. The module will attempt to recover from its last checkpoint immediately.")
-    st.write("• Checkpoint saves are non-blocking — they run in background threads so UI remains responsive.")
-    st.write("• Use 'Reset Checkpoints & Logs' to clear saved files and start fresh.")
+            <section style="margin-top:20px;">
+              <h3 style="margin:0 0 8px 0;">Real-Time Event Log</h3>
+              <div style="overflow:auto;">
+                <table class="log-table" border="0">
+                  <thead style="background:#f8fafc;">
+                    <tr>
+                      <th style="text-align:left; padding:12px; color:#64748b;">Timestamp</th>
+                      <th style="text-align:left; padding:12px; color:#64748b;">Level</th>
+                      <th style="text-align:left; padding:12px; color:#64748b;">Event</th>
+                    </tr>
+                  </thead>
+                  <tbody>{rows}</tbody>
+                </table>
+              </div>
+            </section>
+          </main>
+        </div>
+        <script>setTimeout(() => window.location.reload(), 2200);</script>
+      </body>
+    </html>
+    """
+    return render_template_string(html)
 
-# ----------------------
-# Auto refresh loop
-# ----------------------
-# A short sleep and rerun gives the illusion of a continuously updating dashboard.
-# Keep it short but not zero to avoid busy looping.
+@app.route("/fail/<module_name>")
+def fail_module(module_name):
+    if module_name in state:
+        with state_lock:
+            state[module_name]["failed"] = True
+            state[module_name]["status"] = "Failed"
+        add_log("ERROR", f"{module_name}: manual failure triggered")
+    return redirect(url_for("dashboard"))
 
-time.sleep(1)
-st.experimental_rerun()
+@app.route("/recover/<module_name>")
+def recover_route(module_name):
+    if module_name in state:
+        with state_lock:
+            state[module_name]["failed"] = False
+            state[module_name]["status"] = "Recovering..."
+        recover_module(module_name)
+    return redirect(url_for("dashboard"))
+
+@app.route("/reset")
+def reset_all():
+    for meta in MODULES.values():
+        if os.path.exists(meta["file"]):
+            os.remove(meta["file"])
+    if os.path.exists(LOG_FILE):
+        os.remove(LOG_FILE)
+
+    with state_lock:
+        for name in state:
+            state[name] = {"value": None, "status": "Active", "last_cp": None, "history": [], "failed": False, "last_checkpoint_time_epoch": 0.0}
+    add_log("INFO", "System reset: checkpoints and logs cleared")
+    return redirect(url_for("dashboard"))
+
+# -------------------------
+# Start background threads
+# -------------------------
+for module_name in MODULES:
+    threading.Thread(target=module_loop, args=(module_name,), daemon=True).start()
+
+if __name__ == "__main__":
+    add_log("INFO", "System starting (Kolkata time).")
+    app.run(debug=True, use_reloader=False)
