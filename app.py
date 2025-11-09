@@ -1,6 +1,6 @@
 # app.py
-from flask import Flask, render_template_string, redirect, url_for
-import threading, time, random, pickle, os, json
+from flask import Flask, render_template_string, redirect, url_for, jsonify, send_file
+import threading, time, random, pickle, os, json, tempfile
 from datetime import datetime
 
 try:
@@ -29,15 +29,18 @@ state = {
     name: {
         "value": None,
         "status": "Active",
-        "last_cp": None,
+        "last_cp": None,                      # human readable timestamp
         "history": [],
         "failed": False,
-        "last_checkpoint_time_epoch": 0.0,
+        "last_checkpoint_time_epoch": 0.0,    # numeric used for scheduling
+        "seq": 0,                             # sequence number for samples
+        "last_value_time": None,              # human readable timestamp for last value update
     }
     for name in MODULES
 }
 
 state_lock = threading.Lock()
+log_lock = threading.Lock()
 
 # -------------------------
 # Helpers
@@ -49,41 +52,65 @@ def now_local_iso():
 
 def add_log(level, msg):
     entry = {"time": now_local_iso(), "level": level, "msg": msg}
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    line = json.dumps(entry, ensure_ascii=False)
+    with log_lock:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 def read_recent_logs(limit=80):
     """Read recent logs safely — skip malformed or incomplete lines."""
     if not os.path.exists(LOG_FILE):
         return []
     entries = []
-    with open(LOG_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                if "time" in data and "level" in data and "msg" in data:
-                    entries.append(data)
-            except json.JSONDecodeError:
-                # Skip any bad lines silently
-                continue
+    with log_lock:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if "time" in data and "level" in data and "msg" in data:
+                        entries.append(data)
+                except json.JSONDecodeError:
+                    # Skip any bad lines silently
+                    continue
     return list(reversed(entries))[:limit]
-
 
 # -------------------------
 # Checkpointing / Recovery
 # -------------------------
+def _atomic_write_pickle(path, payload):
+    """Write pickle atomically: write to tmp then replace."""
+    dir_ = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".ckpt_", dir=dir_)
+    os.close(fd)
+    try:
+        with open(tmp_path, "wb") as f:
+            pickle.dump(payload, f)
+        os.replace(tmp_path, path)  # atomic on same filesystem
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
 def save_checkpoint_file(module_name, value):
     meta = MODULES[module_name]
     path = meta["file"]
     try:
-        with open(path, "wb") as f:
-            pickle.dump({"value": value, "time": now_local_iso()}, f)
+        payload = {
+            "module": module_name,
+            "value": value,
+            "unit": meta["unit"],
+            "time": now_local_iso(),
+            "epoch": time.time(),
+        }
+        _atomic_write_pickle(path, payload)
         with state_lock:
-            state[module_name]["last_cp"] = now_local_iso()
-            state[module_name]["last_checkpoint_time_epoch"] = time.time()
+            state[module_name]["last_cp"] = payload["time"]
+            state[module_name]["last_checkpoint_time_epoch"] = payload["epoch"]
         add_log("SUCCESS", f"{module_name}: checkpoint saved @ {state[module_name]['last_cp']}")
     except Exception as e:
         add_log("ERROR", f"{module_name}: checkpoint save failed ({e})")
@@ -117,6 +144,7 @@ def recover_module(module_name):
             state[module_name]["status"] = "Recovered"
             state[module_name]["failed"] = False
             state[module_name]["last_cp"] = data.get("time")
+            # do not update last_checkpoint_time_epoch here; it reflects the file's own epoch
             add_log("SUCCESS", f"{module_name}: recovered from checkpoint @ {data.get('time')}")
         else:
             state[module_name]["status"] = "No Checkpoint"
@@ -139,7 +167,8 @@ def module_loop(name):
     meta = MODULES[name]
     interval = meta["interval"]
     last_ck = time.time() - (interval // 2)
-    state[name]["last_checkpoint_time_epoch"] = last_ck
+    with state_lock:
+        state[name]["last_checkpoint_time_epoch"] = last_ck
 
     while True:
         with state_lock:
@@ -154,18 +183,23 @@ def module_loop(name):
 
         new_val = generate_value_for(name)
         with state_lock:
+            state[name]["seq"] += 1
             state[name]["value"] = new_val
+            state[name]["last_value_time"] = now_local_iso()
             state[name]["history"].append(new_val)
             if len(state[name]["history"]) > 300:
                 state[name]["history"] = state[name]["history"][-300:]
 
         now_epoch = time.time()
-        last_cp = state[name]["last_checkpoint_time_epoch"]
+        with state_lock:
+            last_cp = state[name]["last_checkpoint_time_epoch"]
+
         if now_epoch - last_cp >= interval:
             with state_lock:
                 state[name]["status"] = "Checkpointing..."
             async_save_checkpoint(name, new_val)
 
+        # 1% simulated failure
         if random.random() < 0.01:
             with state_lock:
                 state[name]["failed"] = True
@@ -175,7 +209,7 @@ def module_loop(name):
         time.sleep(1)
 
 # -------------------------
-# Routes
+# Routes (UI preserved exactly)
 # -------------------------
 @app.route("/")
 def dashboard():
@@ -254,6 +288,8 @@ def dashboard():
             <div style="display:flex; gap:12px; align-items:center;">
               <a href="/" style="text-decoration:none; color:#0f172a; font-weight:700;">Refresh</a>
               <a href="/reset" style="text-decoration:none; color:#0f172a; font-weight:700;">Reset</a>
+              <a href="/api/state" style="text-decoration:none; color:#0f172a; font-weight:700;">API</a>
+              <a href="/logs" style="text-decoration:none; color:#0f172a; font-weight:700;">Logs</a>
             </div>
           </header>
 
@@ -305,17 +341,56 @@ def recover_route(module_name):
 
 @app.route("/reset")
 def reset_all():
+    # Clear checkpoints and logs
     for meta in MODULES.values():
         if os.path.exists(meta["file"]):
-            os.remove(meta["file"])
+            try:
+                os.remove(meta["file"])
+            except Exception:
+                pass
     if os.path.exists(LOG_FILE):
-        os.remove(LOG_FILE)
+        try:
+            os.remove(LOG_FILE)
+        except Exception:
+            pass
 
     with state_lock:
         for name in state:
-            state[name] = {"value": None, "status": "Active", "last_cp": None, "history": [], "failed": False, "last_checkpoint_time_epoch": 0.0}
+            state[name] = {
+                "value": None, "status": "Active", "last_cp": None, "history": [],
+                "failed": False, "last_checkpoint_time_epoch": 0.0, "seq": 0, "last_value_time": None
+            }
     add_log("INFO", "System reset: checkpoints and logs cleared")
     return redirect(url_for("dashboard"))
+
+# -------------------------
+# Extra helpful endpoints (do not affect UI styling)
+# -------------------------
+@app.route("/api/state")
+def api_state():
+    with state_lock:
+        snapshot = {
+            name: {
+                "value": s["value"],
+                "unit": MODULES[name]["unit"],
+                "status": s["status"],
+                "last_checkpoint": s["last_cp"],
+                "seq": s["seq"],
+                "last_value_time": s["last_value_time"],
+                "history_len": len(s["history"]),
+                "checkpoint_file": MODULES[name]["file"],
+            }
+            for name, s in state.items()
+        }
+    return jsonify({"time": now_local_iso(), "modules": snapshot})
+
+@app.route("/logs")
+def download_logs():
+    # If log file doesn't exist yet, create an empty one so route still works
+    if not os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+    return send_file(LOG_FILE, as_attachment=True, download_name="events.log", mimetype="text/plain")
 
 # -------------------------
 # Start background threads
