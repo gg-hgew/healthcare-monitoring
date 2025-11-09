@@ -400,4 +400,5 @@ for module_name in MODULES:
 
 if __name__ == "__main__":
     add_log("INFO", "System starting (Kolkata time).")
-    app.run(debug=True, use_reloader=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
